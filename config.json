@@ -1,0 +1,54 @@
+{
+  "token": "MTQ3NzM4NzY0MzU0MDA3ODU5Mg.GVA50k.AcGsj3tVvjk2tQBYca6fZJ36JrrzBcBaYc_e1w",
+  "clientId": "1477387643540078592",
+  "guildId": "1431685093134700677",
+  "defaultVoiceChannel": "1431685096603385880",
+  "defaultTextChannel": "1431685096603385877",
+  "ownerId": "1381631692699336826",
+
+  "player": {
+    "defaultVolume": 50,
+    "maxVolume": 100,
+    "fadeTime": 3000,
+    "preloadNext": true,
+    "defaultEQ": "normal",
+    "bitrate": 320000
+  },
+
+  "trending": {
+    "fetchInterval": 21600000,
+    "minSongs": 50,
+    "maxSongs": 100,
+    "sources": ["tokboard", "tokchart", "fallback"]
+  },
+
+  "autoplay": {
+    "enabled": true,
+    "shuffleDefault": true,
+    "historyDuration": 7200000,
+    "maxRetries": 5,
+    "retryDelay": 5000
+  },
+
+  "embed": {
+    "updateInterval": 30000,
+    "colors": {
+      "pop": "#FF6B9D",
+      "hiphop": "#9B59B6",
+      "electronic": "#3498DB",
+      "latin": "#E74C3C",
+      "rnb": "#F39C12",
+      "rock": "#2C3E50",
+      "default": "#00D4FF",
+      "error": "#FF0000",
+      "success": "#00FF88",
+      "warning": "#FFD700",
+      "info": "#00BFFF"
+    }
+  },
+
+  "keepalive": {
+    "interval": 30000,
+    "healthCheck": 60000
+  }
+}
