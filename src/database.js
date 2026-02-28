@@ -1,259 +1,201 @@
-const Database = require('better-sqlite3');
-const path = require('path');
 const fs = require('fs');
-const { Logger } = require('./utils/logger');
+const path = require('path');
 
 class MusicDatabase {
     constructor() {
-        this.logger = new Logger();
-        const dbDir = path.join(__dirname, '../data');
-        if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
-
-        this.db = new Database(path.join(dbDir, 'music.db'));
-        this.db.pragma('journal_mode = WAL');
-        this.db.pragma('busy_timeout = 5000');
-        this.initialize();
+        this.dbPath = path.join(__dirname, '../data/database.json');
+        this.data = {
+            trending: [],
+            history: [],
+            favorites: [],
+            settings: {},
+            stats: []
+        };
+        this.init();
     }
 
-    initialize() {
-        this.db.exec(`
-            CREATE TABLE IF NOT EXISTS trending_songs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                artist TEXT DEFAULT 'Unknown',
-                youtube_url TEXT,
-                youtube_id TEXT,
-                thumbnail TEXT,
-                duration INTEGER DEFAULT 0,
-                rank INTEGER DEFAULT 0,
-                genre TEXT DEFAULT 'pop',
-                source TEXT DEFAULT 'unknown',
-                fetch_date TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
+    init() {
+        const dir = path.dirname(this.dbPath);
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
 
-            CREATE TABLE IF NOT EXISTS play_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id TEXT NOT NULL,
-                title TEXT NOT NULL,
-                artist TEXT DEFAULT 'Unknown',
-                youtube_url TEXT,
-                youtube_id TEXT,
-                requested_by TEXT,
-                played_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS user_favorites (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id TEXT NOT NULL,
-                title TEXT NOT NULL,
-                artist TEXT DEFAULT 'Unknown',
-                youtube_url TEXT,
-                youtube_id TEXT,
-                added_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(user_id, youtube_id)
-            );
-
-            CREATE TABLE IF NOT EXISTS guild_settings (
-                guild_id TEXT PRIMARY KEY,
-                voice_channel_id TEXT,
-                text_channel_id TEXT,
-                volume INTEGER DEFAULT 50,
-                shuffle_mode INTEGER DEFAULT 1,
-                eq_mode TEXT DEFAULT 'normal',
-                autoplay INTEGER DEFAULT 1,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-
-            CREATE TABLE IF NOT EXISTS bot_stats (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id TEXT NOT NULL,
-                songs_played INTEGER DEFAULT 0,
-                total_listen_time INTEGER DEFAULT 0,
-                unique_listeners INTEGER DEFAULT 0,
-                date TEXT NOT NULL,
-                UNIQUE(guild_id, date)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_trending_date ON trending_songs(fetch_date);
-            CREATE INDEX IF NOT EXISTS idx_history_guild ON play_history(guild_id, played_at);
-            CREATE INDEX IF NOT EXISTS idx_favorites_user ON user_favorites(user_id);
-        `);
-
-        this.logger.info('📦 Database initialized successfully');
+        if (fs.existsSync(this.dbPath)) {
+            try {
+                const fileData = fs.readFileSync(this.dbPath, 'utf-8');
+                this.data = JSON.parse(fileData);
+                // Ensure structure
+                if (!this.data.trending) this.data.trending = [];
+                if (!this.data.history) this.data.history = [];
+                if (!this.data.favorites) this.data.favorites = [];
+                if (!this.data.settings) this.data.settings = {};
+                if (!this.data.stats) this.data.stats = [];
+            } catch (e) {
+                console.error('Database corrupted, resetting...', e);
+                this.save();
+            }
+        } else {
+            this.save();
+        }
+        console.log('📦 JSON Database initialized');
     }
 
-    // Trending Songs
+    save() {
+        fs.writeFileSync(this.dbPath, JSON.stringify(this.data, null, 2));
+    }
+
+    // --- TRENDING ---
     saveTrendingSongs(songs, source) {
         const fetchDate = new Date().toISOString().split('T')[0];
-        const deleteStmt = this.db.prepare('DELETE FROM trending_songs WHERE fetch_date = ? AND source = ?');
-        const insertStmt = this.db.prepare(`
-            INSERT INTO trending_songs (title, artist, youtube_url, youtube_id, thumbnail, duration, rank, genre, source, fetch_date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `);
-
-        const transaction = this.db.transaction((songs) => {
-            deleteStmt.run(fetchDate, source);
-            for (const song of songs) {
-                insertStmt.run(
-                    song.title, song.artist, song.youtube_url || '',
-                    song.youtube_id || '', song.thumbnail || '',
-                    song.duration || 0, song.rank || 0,
-                    song.genre || 'pop', source, fetchDate
-                );
-            }
+        // Remove old trending for this source/date
+        this.data.trending = this.data.trending.filter(s => !(s.fetch_date === fetchDate && s.source === source));
+        
+        // Add new
+        songs.forEach(s => {
+            this.data.trending.push({
+                ...s,
+                fetch_date: fetchDate,
+                source: source
+            });
         });
-
-        transaction(songs);
-        this.logger.info(`📦 Saved ${songs.length} trending songs from ${source}`);
+        
+        // Limit total size to prevent lag (keep last 500)
+        if (this.data.trending.length > 500) {
+            this.data.trending = this.data.trending.slice(-500);
+        }
+        this.save();
     }
 
     getTrendingSongs(limit = 50) {
-        return this.db.prepare(`
-            SELECT * FROM trending_songs
-            ORDER BY fetch_date DESC, rank ASC
-            LIMIT ?
-        `).all(limit);
+        return this.data.trending
+            .sort((a, b) => new Date(b.fetch_date) - new Date(a.fetch_date) || a.rank - b.rank)
+            .slice(0, limit);
     }
 
     getLatestTrendingSongs(limit = 50) {
-        const latestDate = this.db.prepare(
-            'SELECT fetch_date FROM trending_songs ORDER BY fetch_date DESC LIMIT 1'
-        ).get();
-
-        if (!latestDate) return [];
-
-        return this.db.prepare(`
-            SELECT * FROM trending_songs
-            WHERE fetch_date = ?
-            ORDER BY rank ASC
-            LIMIT ?
-        `).all(latestDate.fetch_date, limit);
+        if (this.data.trending.length === 0) return [];
+        // Sort by date desc
+        const sorted = [...this.data.trending].sort((a, b) => new Date(b.fetch_date) - new Date(a.fetch_date));
+        const latestDate = sorted[0].fetch_date;
+        
+        return sorted
+            .filter(s => s.fetch_date === latestDate)
+            .sort((a, b) => a.rank - b.rank)
+            .slice(0, limit);
     }
 
-    // Play History
+    getCachedSongs() {
+        return this.getLatestTrendingSongs();
+    }
+
+    // --- HISTORY ---
     addToHistory(guildId, song) {
-        this.db.prepare(`
-            INSERT INTO play_history (guild_id, title, artist, youtube_url, youtube_id, requested_by)
-            VALUES (?, ?, ?, ?, ?, ?)
-        `).run(guildId, song.title, song.artist || 'Unknown',
-            song.youtube_url || '', song.youtube_id || '',
-            song.requested_by || 'Auto');
-    }
-
-    getRecentHistory(guildId, hours = 2) {
-        const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
-        return this.db.prepare(`
-            SELECT * FROM play_history
-            WHERE guild_id = ? AND played_at > ?
-            ORDER BY played_at DESC
-        `).all(guildId, since);
+        this.data.history.unshift({
+            guild_id: guildId,
+            title: song.title,
+            artist: song.artist,
+            youtube_id: song.youtube_id,
+            played_at: new Date().toISOString()
+        });
+        if (this.data.history.length > 200) this.data.history.pop(); // Keep small
+        this.save();
     }
 
     isRecentlyPlayed(guildId, youtubeId, hours = 2) {
-        const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
-        const result = this.db.prepare(`
-            SELECT COUNT(*) as count FROM play_history
-            WHERE guild_id = ? AND youtube_id = ? AND played_at > ?
-        `).get(guildId, youtubeId, since);
-        return result.count > 0;
+        const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).getTime();
+        return this.data.history.some(h => 
+            h.guild_id === guildId && 
+            h.youtube_id === youtubeId && 
+            new Date(h.played_at).getTime() > cutoff
+        );
     }
 
-    // User Favorites
+    // --- FAVORITES ---
     addFavorite(userId, song) {
-        try {
-            this.db.prepare(`
-                INSERT OR IGNORE INTO user_favorites (user_id, title, artist, youtube_url, youtube_id)
-                VALUES (?, ?, ?, ?, ?)
-            `).run(userId, song.title, song.artist || 'Unknown',
-                song.youtube_url || '', song.youtube_id || '');
-            return true;
-        } catch {
-            return false;
-        }
-    }
+        const exists = this.isFavorite(userId, song.youtube_id);
+        if (exists) return false;
 
-    removeFavorite(userId, youtubeId) {
-        const result = this.db.prepare(
-            'DELETE FROM user_favorites WHERE user_id = ? AND youtube_id = ?'
-        ).run(userId, youtubeId);
-        return result.changes > 0;
-    }
-
-    getFavorites(userId) {
-        return this.db.prepare(
-            'SELECT * FROM user_favorites WHERE user_id = ? ORDER BY added_at DESC'
-        ).all(userId);
-    }
-
-    isFavorite(userId, youtubeId) {
-        const result = this.db.prepare(
-            'SELECT COUNT(*) as count FROM user_favorites WHERE user_id = ? AND youtube_id = ?'
-        ).get(userId, youtubeId);
-        return result.count > 0;
-    }
-
-    // Guild Settings
-    getSettings(guildId) {
-        let settings = this.db.prepare(
-            'SELECT * FROM guild_settings WHERE guild_id = ?'
-        ).get(guildId);
-
-        if (!settings) {
-            this.db.prepare(`
-                INSERT INTO guild_settings (guild_id) VALUES (?)
-            `).run(guildId);
-            settings = this.db.prepare(
-                'SELECT * FROM guild_settings WHERE guild_id = ?'
-            ).get(guildId);
-        }
-
-        return settings;
-    }
-
-    updateSettings(guildId, key, value) {
-        const allowed = ['voice_channel_id', 'text_channel_id', 'volume', 'shuffle_mode', 'eq_mode', 'autoplay'];
-        if (!allowed.includes(key)) return false;
-
-        this.getSettings(guildId); // Ensure exists
-        this.db.prepare(`
-            UPDATE guild_settings SET ${key} = ?, updated_at = CURRENT_TIMESTAMP WHERE guild_id = ?
-        `).run(value, guildId);
+        this.data.favorites.push({
+            user_id: userId,
+            title: song.title,
+            artist: song.artist || 'Unknown',
+            youtube_url: song.youtube_url,
+            youtube_id: song.youtube_id,
+            added_at: new Date().toISOString()
+        });
+        this.save();
         return true;
     }
 
-    // Stats
-    incrementStats(guildId, field) {
-        const date = new Date().toISOString().split('T')[0];
-        this.db.prepare(`
-            INSERT INTO bot_stats (guild_id, date, ${field})
-            VALUES (?, ?, 1)
-            ON CONFLICT(guild_id, date)
-            DO UPDATE SET ${field} = ${field} + 1
-        `).run(guildId, date);
+    removeFavorite(userId, youtubeId) {
+        const initLen = this.data.favorites.length;
+        this.data.favorites = this.data.favorites.filter(f => !(f.user_id === userId && f.youtube_id === youtubeId));
+        const changed = this.data.favorites.length !== initLen;
+        if (changed) this.save();
+        return changed;
     }
 
-    getStats(guildId, days = 7) {
-        const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-        return this.db.prepare(`
-            SELECT * FROM bot_stats
-            WHERE guild_id = ? AND date >= ?
-            ORDER BY date DESC
-        `).all(guildId, since);
+    getFavorites(userId) {
+        return this.data.favorites.filter(f => f.user_id === userId);
+    }
+
+    isFavorite(userId, youtubeId) {
+        return this.data.favorites.some(f => f.user_id === userId && f.youtube_id === youtubeId);
+    }
+
+    // --- SETTINGS ---
+    getSettings(guildId) {
+        if (!this.data.settings[guildId]) {
+            this.data.settings[guildId] = {
+                guild_id: guildId,
+                volume: 50,
+                shuffle_mode: 1,
+                eq_mode: 'normal',
+                autoplay: 1
+            };
+            this.save();
+        }
+        return this.data.settings[guildId];
+    }
+
+    updateSettings(guildId, key, value) {
+        if (!this.data.settings[guildId]) this.getSettings(guildId);
+        this.data.settings[guildId][key] = value;
+        this.save();
+        return true;
+    }
+
+    // --- STATS ---
+    incrementStats(guildId, field) {
+        const date = new Date().toISOString().split('T')[0];
+        let stat = this.data.stats.find(s => s.guild_id === guildId && s.date === date);
+        
+        if (!stat) {
+            stat = { guild_id: guildId, date: date, songs_played: 0, total_listen_time: 0 };
+            this.data.stats.push(stat);
+        }
+        
+        if (field === 'songs_played') stat.songs_played++;
+        this.save();
     }
 
     getTotalStats(guildId) {
-        return this.db.prepare(`
-            SELECT
-                COALESCE(SUM(songs_played), 0) as total_songs,
-                COALESCE(SUM(total_listen_time), 0) as total_time,
-                COUNT(DISTINCT date) as active_days
-            FROM bot_stats WHERE guild_id = ?
-        `).get(guildId);
+        const guildStats = this.data.stats.filter(s => s.guild_id === guildId);
+        return {
+            total_songs: guildStats.reduce((a, b) => a + (b.songs_played || 0), 0),
+            active_days: guildStats.length
+        };
+    }
+
+    getStats(guildId, days = 7) {
+        return this.data.stats
+            .filter(s => s.guild_id === guildId)
+            .sort((a, b) => new Date(b.date) - new Date(a.date))
+            .slice(0, days);
     }
 
     close() {
-        this.db.close();
+        this.save();
     }
 }
 
